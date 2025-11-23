@@ -4,10 +4,12 @@ This module contain the code for frontend
 
 from .communicator import Communicator
 import tkinter as tk
-from tkinter import ttk,  WORD
+from tkinter import ttk, WORD, filedialog
 from scraper.scraper import Backend
 from .common  import Common
 import threading
+import pandas as pd
+import os
 
 
 
@@ -74,6 +76,38 @@ class Frontend:
         )
         self.outputFormatButton.place(x=355, y=240)
 
+        """For Excel file upload"""
+        self.upload_label = ttk.Label(
+            self.root,
+            text="Upload Excel:",
+            font=("Franklin Gothic Medium", 17),
+            foreground="green",
+            background="white",
+        )
+        self.upload_label.place(x=255, y=280)
+
+        self.upload_button = ttk.Button(
+            self.root,
+            text="Browse Excel File",
+            width=15,
+            command=self.upload_excel_file,
+            style="my.TButton",
+        )
+        self.upload_button.place(x=355, y=285)
+
+        self.uploaded_file_label = ttk.Label(
+            self.root,
+            text="No file selected",
+            font=("Arial", 10),
+            foreground="gray",
+            background="white",
+        )
+        self.uploaded_file_label.place(x=500, y=290)
+
+        self.uploaded_file_path = None
+        self.queries_from_file = []
+        self.is_batch_processing = False
+
         """for message box"""
         self.show_text = tk.Text(
             self.root,
@@ -104,6 +138,45 @@ class Frontend:
     def init_communicator(self):
         Communicator.set_frontend_object(self)
 
+    def upload_excel_file(self):
+        """Handle Excel file upload and extract queries"""
+        file_path = filedialog.askopenfilename(
+            title="Select Excel File",
+            filetypes=[("Excel files", "*.xlsx *.xls"), ("All files", "*.*")]
+        )
+        
+        if file_path:
+            self.uploaded_file_path = file_path
+            filename = os.path.basename(file_path)
+            self.uploaded_file_label.config(text=filename[:30] + "..." if len(filename) > 30 else filename, foreground="green")
+            
+            try:
+                # Read Excel file and extract queries
+                df = pd.read_excel(file_path)
+                
+                # Check if 'query' column exists
+                if 'query' not in df.columns:
+                    self.__replacingtext("Error: Excel file must contain a 'query' column")
+                    self.uploaded_file_path = None
+                    self.uploaded_file_label.config(text="No file selected", foreground="gray")
+                    return
+                
+                # Extract queries (remove NaN values)
+                self.queries_from_file = df['query'].dropna().astype(str).tolist()
+                
+                if len(self.queries_from_file) == 0:
+                    self.__replacingtext("Error: No valid queries found in the 'query' column")
+                    self.uploaded_file_path = None
+                    self.uploaded_file_label.config(text="No file selected", foreground="gray")
+                else:
+                    self.__replacingtext(f"Successfully loaded {len(self.queries_from_file)} queries from Excel file")
+                    
+            except Exception as e:
+                self.__replacingtext(f"Error reading Excel file: {str(e)}")
+                self.uploaded_file_path = None
+                self.uploaded_file_label.config(text="No file selected", foreground="gray")
+                self.queries_from_file = []
+
     def __replacingtext(self, text):
         """This function will insert the text in text showing box"""
 
@@ -114,23 +187,34 @@ class Frontend:
         self.show_text.config(state="disabled")
 
     def getinput(self):
-        self.searchQuery = self.search_box.get()
         self.outputFormatValue = self.outputFormatButton.get()
 
-        if len(self.searchQuery) == 0 and len(self.outputFormatValue) == 0:
-            self.__replacingtext(text="Oops! Your query is not valid")
-
-        elif len(self.searchQuery) == 0:
-            self.__replacingtext(text="Oops! You did empty search")
-        elif len(self.outputFormatValue) == 0:
+        if len(self.outputFormatValue) == 0:
             self.__replacingtext(text="Oops! You did not select output format")
+            return
 
-        else:
+        self.outputFormatValue = self.outputFormatValue.lower()
+        self.headlessMode = self.healdessCheckBoxVar.get()
+
+        # Check if Excel file is uploaded
+        if self.uploaded_file_path and len(self.queries_from_file) > 0:
+            # Process multiple queries from Excel file
+            self.is_batch_processing = True
             self.submit_button.config(state="disabled")
+            self.upload_button.config(state="disabled")
+            self.threadToStartBackend = threading.Thread(
+                target=self.process_multiple_queries)
+            self.threadToStartBackend.start()
+        else:
+            # Process single query from search box
+            self.searchQuery = self.search_box.get()
 
+            if len(self.searchQuery) == 0:
+                self.__replacingtext(text="Oops! You did empty search. Either enter a query or upload an Excel file.")
+                return
+
+            self.submit_button.config(state="disabled")
             self.searchQuery = self.searchQuery.lower()
-            self.outputFormatValue = self.outputFormatValue.lower()
-            self.headlessMode = self.healdessCheckBoxVar.get()
 
             self.threadToStartBackend = threading.Thread(
                 target=self.startscraping)
@@ -155,10 +239,47 @@ class Frontend:
 
         backend.mainscraping()
     
+    def process_multiple_queries(self):
+        """Process multiple queries from Excel file sequentially"""
+        total_queries = len(self.queries_from_file)
+        self.__replacingtext(f"Starting batch processing of {total_queries} queries...")
+        
+        for index, query in enumerate(self.queries_from_file, 1):
+            if Common.close_thread_is_set():
+                self.__replacingtext("Processing cancelled by user")
+                break
+                
+            query = str(query).strip()
+            if not query:
+                continue
+                
+            self.__replacingtext(f"Processing query {index}/{total_queries}: {query}")
+            
+            try:
+                backend = Backend(
+                    query.lower(),
+                    self.outputFormatValue,
+                    healdessmode=self.headlessMode
+                )
+                backend.mainscraping()
+                
+                self.__replacingtext(f"Completed query {index}/{total_queries}: {query}")
+            except Exception as e:
+                self.__replacingtext(f"Error processing query {index}/{total_queries} ({query}): {str(e)}")
+                continue
+        
+        self.__replacingtext(f"Batch processing completed! Processed {total_queries} queries.")
+        self.is_batch_processing = False
+        self.end_processing()
+    
     def end_processing(self):
-        self.submit_button.config(state="normal")
+        # Only re-enable buttons if not in batch processing mode
+        # (during batch processing, buttons should stay disabled until all queries are done)
+        if not self.is_batch_processing:
+            self.submit_button.config(state="normal")
+            self.upload_button.config(state="normal")
         try:
-            if self.threadToStartBackend.is_alive():
+            if hasattr(self, 'threadToStartBackend') and self.threadToStartBackend.is_alive():
                 self.threadToStartBackend.join()
         except:
             pass
